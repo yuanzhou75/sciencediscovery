@@ -30,7 +30,6 @@ import { TEXT } from "../text.js";
 import { AnswerBlock, AssistantAvatar, AssistantTurns } from "./AssistantTurn.js";
 import { UploadCards } from "./UploadCards.js";
 import { placeUploads, type UploadedFile } from "./uploads.js";
-import { RowMenu, type MenuState } from "./RowMenu.js";
 
 interface Props {
   onBranch?: (messageId: string) => void;
@@ -119,7 +118,8 @@ function UserRow({ content, files }: { content: string; files?: readonly Uploade
   );
 }
 
-function MessageRow({ answered, message, uploads }: {
+function MessageRow({ answered, message, uploads, onBranch }: {
+  onBranch?: () => void;
   answered?: boolean;
   message: ChatMessage;
   uploads?: readonly UploadedFile[];
@@ -153,7 +153,7 @@ function MessageRow({ answered, message, uploads }: {
       <div className="body">
         {/* The same element a replayed run renders its answer with, so a stored
             answer and a reconstructed one cannot drift apart. */}
-        <AnswerBlock actions answered={answered} content={message.content} />
+        <AnswerBlock actions answered={answered} content={message.content} onBranch={onBranch} />
       </div>
     </div>
   );
@@ -207,7 +207,6 @@ export function Conversation({
   run,
   workspaceFiles,
 }: Props) {
-  const [messageMenu, setMessageMenu] = useState<MenuState>();
   const scroller = useRef<HTMLElement>(null);
   const stick = useRef(true);
   /** How tall the transcript was at the last pin. Growth after it is the
@@ -280,6 +279,7 @@ export function Conversation({
                 <MessageRow
                   answered={answeredAfter[index]}
                   message={message}
+                  onBranch={onBranch && message.role === "assistant" ? () => onBranch(message.id) : undefined}
                   uploads={uploads.byMessage.get(message.id)}
                 />
               ) : (
@@ -290,12 +290,10 @@ export function Conversation({
                   onOpenSubagent={onOpenSubagent}
                   onOpenTool={onOpenTool}
                   run={replacement}
+                  onBranch={onBranch ? () => onBranch(message.id) : undefined}
                   sessionId={detail?.id}
                 />
               )}
-              {message.role === "assistant" && (!message.kind || message.kind === "message") && message.content.trim() && onBranch ? (
-                <div className="answer-tools"><button className="answer-tool" aria-label={TEXT.researchPackage.messageMenu} aria-haspopup="menu" type="button" onClick={event => setMessageMenu({ x: event.clientX, y: event.clientY, items: [{ label: TEXT.researchPackage.branch, onSelect: () => onBranch(message.id) }] })}>⋯</button></div>
-              ) : null}
               {/* A run that never wrote an answer still belongs here, after
                   the message that started it, rather than at the end of a
                   conversation it did not come last in. */}
@@ -342,7 +340,6 @@ export function Conversation({
         ) : null}
         {loading ? <div className="status-strip">{TEXT.boot.checking}</div> : null}
       </div>
-      <RowMenu menu={messageMenu} onClose={() => setMessageMenu(undefined)} />
     </section>
   );
 }
