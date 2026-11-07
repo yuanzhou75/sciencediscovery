@@ -69,7 +69,7 @@ import { Landing } from "./views/Landing.js";
 import { OfflineScreen } from "./views/OfflineScreen.js";
 import { Rail } from "./views/Rail.js";
 import { SessionBar } from "./views/SessionBar.js";
-import { ResearchPackage, evidenceReadOnly } from "./views/ResearchPackage.js";
+import { ResearchPackage, evidenceReadOnly, type PackageRequest } from "./views/ResearchPackage.js";
 import { SetupWizard } from "./views/SetupWizard.js";
 import {
   SystemSettingsDialog,
@@ -85,6 +85,7 @@ interface Props {
 }
 
 export function App({ initialToken }: Props) {
+  const [packageRequest, setPackageRequest] = useState<PackageRequest>();
   const [token, setToken] = useState(initialToken);
   /** Set when the server answered 401, so the gate can say "this one was
    *  refused" instead of the generic "we have no credential". */
@@ -733,6 +734,8 @@ export function App({ initialToken }: Props) {
         {taskSidebar ? (
           <Sidebar
             actions={actions}
+            onExportSession={session => setPackageRequest({ kind: "export", sessionId: session.id, projectId: session.projectId })}
+            onImportSession={projectId => setPackageRequest({ kind: "import", projectId: projectId ?? state.inboxProject?.id })}
             activeProjectId={state.activeProjectId}
             activeSessionId={state.sessionId}
             onToggleSidebar={() => setSidebarOpen(false)}
@@ -767,7 +770,6 @@ export function App({ initialToken }: Props) {
             onOpen={setEvolveRunId}
             runs={evolve.runs}
           />
-          <ResearchPackage client={client} projectId={state.detail?.projectId ?? state.activeProjectId} detail={state.detail} running={state.running} onOpen={(id) => void actions.openSession(id)} onRefresh={actions.refreshCatalog} />
           {landing ? (
             /* The page's category and its open topic row belong to one
                session; the key is what ends them when the session does. */
@@ -781,6 +783,7 @@ export function App({ initialToken }: Props) {
                 onDecidePermission={(request, decision) => actions.decidePermission(request.id, decision)}
                 onOpenSubagent={openSubagentDetails}
                 onOpenTool={openToolDetails}
+                onBranch={messageId => setPackageRequest({ kind: "branch", sessionId: state.detail?.id, projectId: state.detail?.projectId, messageId })}
                 pending={state.pendingMessage}
                 replays={state.replays}
                 run={state.run}
@@ -789,6 +792,7 @@ export function App({ initialToken }: Props) {
               {evidenceReadOnly(state.detail) ? null : <Composer {...composerProps} />}
             </>
           )}
+          <ResearchPackage client={client} request={packageRequest} detail={state.detail} onOpen={(id) => void actions.openSession(id)} onRefresh={actions.refreshCatalog} />
         </main>
 
         <WorkspacePanel
