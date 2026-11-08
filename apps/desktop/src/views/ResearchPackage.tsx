@@ -89,7 +89,11 @@ export function ResearchPackage({ client, request, projects, detail: activeDetai
     return () => { active = false; clearTimeout(timer); };
   }, [client, dialog, detail?.id, projectId, level, trajectory, graph, files]);
   useEffect(() => {
-    if (copy?.state !== "copying") return;
+    // A copy belongs to the session that started it. Once the user switches to
+    // another session, stop polling so its error never overwrites the current
+    // conversation's UI; the background copy still finishes server-side and is
+    // picked up again on return.
+    if (copy?.state !== "copying" || copy.sourceSessionId !== activeDetail?.id) return;
     let active = true; let timer: ReturnType<typeof setTimeout>; let failures = 0;
     const poll = () => { void readCopy(client, copy.sourceSessionId, copy.id).then(async next => {
       if (!active) return;
@@ -106,7 +110,7 @@ export function ResearchPackage({ client, request, projects, detail: activeDetai
       if (!step.terminate) timer = setTimeout(poll, 3000);
     }); };
     timer = setTimeout(poll, 1000); return () => { active = false; clearTimeout(timer); };
-  }, [client, copy?.id, copy?.state]);
+  }, [client, copy?.id, copy?.state, activeDetail?.id]);
   useEffect(() => {
     if (!exportTask || !["queued", "running"].includes(exportTask.task.status)) return;
     let active = true; let timer: ReturnType<typeof setTimeout>;
@@ -131,7 +135,7 @@ export function ResearchPackage({ client, request, projects, detail: activeDetai
   return <>
     {readOnly ? <div className="research-package-resume"><p className="research-package-notice">{canContinue ? t.readOnly : t.continueUnavailable}</p><button className="primary-button" disabled={!canContinue || busy || copy?.state === "copying"} onClick={() => void copyResearch()} type="button">{t.continue}</button></div> : null}
     {branch ? <button className="research-package-source" onClick={() => onOpen(branch.sourceSessionId)} type="button">{t.source}</button> : null}
-    {copy ? <div className="research-package-status" role="status">{copy.state === "copying" ? t.copying : copy.state === "failed" ? copy.error ?? t.failed : t.ready}{copy.state === "ready" && copy.entrySessionId ? <button onClick={() => onOpen(copy.entrySessionId!)} type="button">{t.open}</button> : null}</div> : null}
+    {copy && copy.sourceSessionId === activeDetail?.id ? <div className="research-package-status" role="status">{copy.state === "copying" ? t.copying : copy.state === "failed" ? copy.error ?? t.failed : t.ready}{copy.state === "ready" && copy.entrySessionId ? <button onClick={() => onOpen(copy.entrySessionId!)} type="button">{t.open}</button> : null}</div> : null}
     {exportTask ? <div className={`research-package-status${exportTask.task.status === "failed" ? " is-failed" : ""}`} role="status">{["queued", "running"].includes(exportTask.task.status) ? <span aria-hidden="true" className="spinner" /> : null}{exportTask.task.status === "completed" ? exportTask.task.filename : exportTask.task.status === "failed" ? exportTask.task.error ?? t.failed : t.preparing}{exportTask.task.status === "completed" ? <button onClick={() => void perform(() => downloadExport(client, exportTask.project, exportTask.task))} type="button">{t.download}</button> : null}</div> : null}
     {error ? <p role="alert" className="research-package-error">{error}</p> : null}
     {dialog ? <div className="modal-backdrop" onClick={() => !busy && setDialog(undefined)}><section className="modal-panel research-package-dialog" role="dialog" aria-modal="true" aria-labelledby="research-package-title" onClick={event => event.stopPropagation()}>
