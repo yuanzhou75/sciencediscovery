@@ -75,6 +75,8 @@ type PreviewSizing = {
    * evidence revision moves.
    */
   workspaceListings?: PreviewWorkspaceListings;
+  /** The evidence revision this preview is being calculated for. */
+  revision?: string;
 };
 
 /**
@@ -90,6 +92,17 @@ type PreviewSizing = {
  */
 type PreviewWorkspaceListings = Map<string, Promise<WorkspaceListing>>;
 
+/**
+ * Reuse one session's listing for the whole dialog request.
+ *
+ * A boundary, stated rather than implied: this list is scanned once per request, so a
+ * file that lands *while* the five profiles are being calculated can answer under a
+ * revision that already contains it. Re-scanning whenever the revision moves would fix
+ * that and undo the point of the sharing — the first profile's own reconcile moves the
+ * revision, so every later profile would scan again, which is the 2–3 scans §7.8 is
+ * about. The dialogs poll, so a file arriving mid-request is picked up on the next
+ * evidence move; a real export rescans and never omits it.
+ */
 function previewWorkspaceListing(listings: PreviewWorkspaceListings, store: Ports["store"], sessionId: string): Promise<WorkspaceListing> {
   const shared = listings.get(sessionId);
   if (shared) return shared;
@@ -806,7 +819,7 @@ export function createResearchSnapshots({ store, evolutionStore, evolveCandidate
       const workspaceListings = (scope ?? new Map()) as PreviewWorkspaceListings;
       const preview: PreviewSizing = { objectSizes: new Map(), additionalRecordBytes: 0, hashes: new Set(), refs: new Map(),
         jsonSizes: new WeakMap(), casVisited: new WeakSet(), refsVisited: new WeakSet(),
-        trajectorySizing: includeFullTrajectory ? trajectorySizingFor(revision) : undefined,
+        trajectorySizing: includeFullTrajectory ? trajectorySizingFor(revision) : undefined, revision,
         workspaceListings };
       const input = await buildResearchPackageInput(projectId, sessionId, level, selectedFiles, undefined, preview, includeFullTrajectory, includeFullMemoryGraph, signal);
       const records = input.records as { sessions?: Array<{ session: { id: string }; workspace?: Array<{ path: string }> }> };

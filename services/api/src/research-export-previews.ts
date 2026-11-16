@@ -8,10 +8,6 @@ export type ExportPreviewOptions = { projectId: string; sessionId?: string; leve
 export type ResearchExportPreview = {
   revision: string; estimatedBytes: number; estimateKind: "uncompressed";
   files: Array<{ path: string; size: number; selected?: boolean }>; omissions: string[]; exportProfile?: ResearchPackageExportProfile;
-  /** The one package cap (#1152). Additive: older clients keep their own default. */
-  maxBytes?: number;
-  /** The exact uncompressed tar size this selection would produce, which is what a refusal is based on. */
-  archiveBytes?: number;
 };
 export type DefaultExportPreviews = {
   revision: string;
