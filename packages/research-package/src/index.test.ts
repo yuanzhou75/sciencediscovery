@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { gunzipSync } from "node:zlib";
+import { createWriteStream } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { gzipSync, gunzipSync } from "node:zlib";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Writable } from "node:stream";
-import { createResearchPackage, createResearchPackageAsync, estimateResearchPackageBytes, importResearchPackage, inspectResearchPackage, jsonBytes, jsonByteLength, jsonDigest, parseJsonBytes, researchPackageArchiveBytes, researchPackageFits, researchPackageUploadBytes, resolveResearchPackageMaxBytes, writeResearchPackage, RESEARCH_PACKAGE_DEFAULT_MAX_BYTES, RESEARCH_PACKAGE_MAX_MAX_BYTES, RESEARCH_PACKAGE_MIN_MAX_BYTES, sha256, type ResearchPackageExportProfile } from "./index.js";
+import { createResearchPackage, createResearchPackageAsync, estimateResearchPackageBytes, importResearchPackage, importResearchPackageFromFile, inspectResearchPackage, jsonBytes, jsonByteLength, jsonDigest, parseJsonBytes, researchPackageArchiveBytes, researchPackageFits, researchPackageUploadBytes, resolveResearchPackageMaxBytes, writeResearchPackage, RESEARCH_PACKAGE_DEFAULT_MAX_BYTES, RESEARCH_PACKAGE_MAX_MAX_BYTES, RESEARCH_PACKAGE_MIN_MAX_BYTES, sha256, type ResearchPackageExportProfile } from "./index.js";
 import { createPluginScope } from "@sciencediscovery/plugin-sdk";
 import { researchPackagePlugin } from "./plugin.js";
 
@@ -225,4 +229,65 @@ test("the streaming writer refuses an over-cap package before writing anything",
   await assert.rejects(() => writeResearchPackage(input, sink, size - 1), /exceeds the archive size limit/);
   assert.equal(chunks.length, 0, "nothing reached the sink");
   await assert.doesNotReject(() => writeResearchPackage(input, sink, size));
+});
+
+test("streaming import extracts a package to disk and hands back object paths", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sd-import-"));
+  try {
+    const archive = join(root, "pkg.sdresearch");
+    const payload = Buffer.alloc(1024 * 1024, 7);
+    const records = { sessions: [{ id: "session-1" }] };
+    const written = await writeResearchPackage({
+      source: { projectId: "project", title: "streaming import" }, records,
+      objects: [{ path: sha256(payload), bytes: payload }],
+    }, createWriteStream(archive), RESEARCH_PACKAGE_MAX_MAX_BYTES);
+    const directory = join(root, "extracted");
+    const imported = await importResearchPackageFromFile(archive, { directory });
+    assert.equal(imported.receipt.packageChecksum, written.packageChecksum);
+    assert.deepEqual(imported.records, records);
+    assert.equal(imported.receipt.importedObjectCount, 1);
+    assert.equal(imported.manifest.inventory.length, 3, "records, README and one object (manifest.json is not an inventory entry)");
+    const [[hash, objectPath]] = [...imported.objects];
+    assert.equal(hash, sha256(payload));
+    assert.deepEqual(await readFile(objectPath), payload);
+    await rm(directory, { recursive: true, force: true });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("streaming import rejects a tampered object and removes the extracted directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sd-import-tamper-"));
+  try {
+    const archive = join(root, "pkg.sdresearch");
+    const payload = Buffer.alloc(4096, 3);
+    await writeResearchPackage({
+      source: { projectId: "project", title: "tamper" }, records: { sessions: [] },
+      objects: [{ path: sha256(payload), bytes: payload }],
+    }, createWriteStream(archive), RESEARCH_PACKAGE_MAX_MAX_BYTES);
+    // Flip one payload byte in the uncompressed tar, then re-compress: the archive is
+    // structurally valid, so only the inventory checksum can catch it.
+    const raw = gunzipSync(await readFile(archive));
+    const at = raw.indexOf(Buffer.alloc(64, 3));
+    assert.ok(at > 0, "payload must be findable in the tar");
+    raw[at + 10] = 9;
+    await writeFile(archive, gzipSync(raw));
+    const directory = join(root, "extracted");
+    await assert.rejects(() => importResearchPackageFromFile(archive, { directory }), /checksum mismatch\/severe|checksum mismatch/i);
+    await assert.rejects(() => readFile(join(directory, "manifest.json")), { code: "ENOENT" }, "the extracted directory is removed");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("streaming import rejects a truncated archive and leaves no extracted directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sd-import-truncated-"));
+  try {
+    const archive = join(root, "pkg.sdresearch");
+    await writeResearchPackage({
+      source: { projectId: "project", title: "truncated" }, records: { sessions: [] },
+      objects: [{ path: sha256(Buffer.alloc(2048, 1)), bytes: Buffer.alloc(2048, 1) }],
+    }, createWriteStream(archive), RESEARCH_PACKAGE_MAX_MAX_BYTES);
+    const bytes = await readFile(archive);
+    await writeFile(archive, bytes.subarray(0, Math.floor(bytes.length * 0.6)));
+    const directory = join(root, "extracted");
+    await assert.rejects(() => importResearchPackageFromFile(archive, { directory }));
+    await assert.rejects(() => readFile(join(directory, "manifest.json")), { code: "ENOENT" });
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

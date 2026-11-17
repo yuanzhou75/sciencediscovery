@@ -1,9 +1,10 @@
 // Copyright (C) 2026-2026 Huawei Technologies Co., Ltd
 // Licensed under the Apache License, Version 2.0 (the "License");
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { open, stat } from "node:fs/promises";
-import { Readable, Transform } from "node:stream";
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdir, open, readFile, rm, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { compose, Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { Writable } from "node:stream";
 import { createGunzip, createGzip, gunzipSync, gzip, gzipSync } from "node:zlib";
@@ -529,6 +530,152 @@ export function importResearchPackage(bytes: Uint8Array): ImportedResearchPackag
   const objects = new Map<string, Uint8Array>(); for (const entry of manifest.inventory.filter((item) => item.kind === "object")) objects.set(entry.path.slice("objects/".length), files.get(entry.path)!);
   const packageChecksum = sha256(bytes); return { manifest, records, objects, readme: files.get("README.md")!, receipt: { packageChecksum, sourcePackageChecksum: packageChecksum,
     importedObjectCount: objects.size, importedRecordBytes: files.get("records.json")!.byteLength, omissions: [...manifest.omissions], createdAt: new Date().toISOString(), ...(manifest.exportProfile ? { exportProfile: manifest.exportProfile } : {}) } };
+}
+
+
+/** A package extracted to disk: entries are files, objects are addressed by hash. */
+export interface ImportedResearchPackageFiles {
+  manifest: PackageManifest;
+  records: unknown;
+  readme: Uint8Array;
+  /** Object hash -> absolute path of its extracted payload. */
+  objects: ReadonlyMap<string, string>;
+  receipt: ImportReceipt;
+  /** The directory the caller owns and must remove when the import is done. */
+  directory: string;
+}
+
+/**
+ * Import a package without keeping it in memory.
+ *
+ * `importResearchPackage` inflates the whole archive and returns views into that
+ * buffer, so peak RSS is compressed + decompressed. This path streams the archive
+ * through gunzip into an incremental tar reader that writes every entry to
+ * `options.directory` and hashes it as it goes: the largest allocation is one chunk,
+ * and callers get object *paths* they read one at a time.
+ *
+ * The limits are the in-memory reader's (content ceiling, per-file ceiling, entry
+ * count, path safety, duplicate entries, checksums). A failure removes the partially
+ * extracted directory instead of leaving it for someone to pick up.
+ */
+export async function importResearchPackageFromFile(archivePath: string,
+  options: { directory: string; maxBytes?: number }): Promise<ImportedResearchPackageFiles> {
+  const maxBytes = options.maxBytes ?? RESEARCH_PACKAGE_MAX_MAX_BYTES;
+  const directory = options.directory;
+  await mkdir(directory, { recursive: true });
+  const hashes = new Map<string, string>();
+  const sizes = new Map<string, number>();
+  let pending: Buffer = Buffer.alloc(0);
+  let mode: "header" | "payload" | "padding" = "header";
+  let done = false;
+  let currentPath = ""; let currentSize = 0; let remaining = 0; let padding = 0;
+  let total = 0; let entries = 0;
+  let sink: ReturnType<typeof createWriteStream> | undefined;
+  let hash: ReturnType<typeof createHash> | undefined;
+
+  const closeSink = async (): Promise<void> => {
+    if (!sink) return;
+    const current = sink; const currentHash = hash;
+    sink = undefined; hash = undefined;
+    await new Promise<void>((resolve, reject) => current.end((error?: Error | null) => error ? reject(error) : resolve()));
+    if (currentHash) { hashes.set(currentPath, currentHash.digest("hex")); sizes.set(currentPath, currentSize); }
+  };
+
+  try {
+    const source = compose(createReadStream(archivePath), createGunzip());
+    for await (const chunk of source) {
+      const buffer = chunk as Buffer;
+      total += buffer.length;
+      if (total > maxBytes) throw researchPackageTooLargeError();
+      let offset = 0;
+      while (offset < buffer.length && !done) {
+        if (mode === "header") {
+          let block: Buffer;
+          if (pending.length > 0) {
+            const need = TAR_BLOCK - pending.length;
+            pending = Buffer.concat([pending, buffer.subarray(offset, offset + need)]);
+            block = pending; pending = Buffer.alloc(0); offset += need;
+          } else {
+            if (buffer.length - offset < TAR_BLOCK) { pending = Buffer.from(buffer.subarray(offset)); offset = buffer.length; break; }
+            block = buffer.subarray(offset, offset + TAR_BLOCK); offset += TAR_BLOCK;
+          }
+          if (block.length < TAR_BLOCK) { pending = Buffer.from(block); break; }
+          if (block.every((byte) => byte === 0)) { done = true; break; }
+          const entryPath = new TextDecoder().decode(block.subarray(0, 100)).replace(/\0.*$/, "");
+          const size = readOctal(block, 124, 12); const type = block[156];
+          if (!entryPath || entryPath.startsWith("/") || entryPath.split("/").includes("..")) throw new Error("Unsafe research package path");
+          if (type !== 0 && type !== 0x30) throw new Error("Research package contains a non-regular file");
+          if (!Number.isSafeInteger(size) || size < 0 || size > MAX_FILE_BYTES) throw new Error("Invalid research package entry size");
+          if (hashes.has(entryPath)) throw new Error(`Duplicate research package entry: ${entryPath}`);
+          entries += 1;
+          if (entries > MAX_ENTRIES) throw new Error("Research package exceeds its limits");
+          currentPath = entryPath; currentSize = size; remaining = size;
+          const target = join(directory, ...entryPath.split("/"));
+          await mkdir(dirname(target), { recursive: true });
+          sink = createWriteStream(target, { flags: "wx" });
+          await new Promise<void>((resolve, reject) => {
+            sink!.once("open", () => resolve());
+            sink!.once("error", reject);
+          });
+          hash = createHash("sha256");
+          if (remaining === 0) {
+            await closeSink();
+            padding = (TAR_BLOCK - (currentSize % TAR_BLOCK)) % TAR_BLOCK;
+            mode = padding === 0 ? "header" : "padding";
+          } else mode = "payload";
+          continue;
+        }
+        if (mode === "padding") {
+          const skip = Math.min(padding, buffer.length - offset);
+          offset += skip; padding -= skip;
+          if (padding === 0) mode = "header";
+          continue;
+        }
+        const take = Math.min(remaining, buffer.length - offset);
+        const part = buffer.subarray(offset, offset + take); offset += take;
+        hash!.update(part); remaining -= take;
+        if (!sink!.write(part)) await new Promise<void>((resolve) => sink!.once("drain", () => resolve()));
+        if (remaining === 0) {
+          await closeSink();
+          padding = (TAR_BLOCK - (currentSize % TAR_BLOCK)) % TAR_BLOCK;
+          mode = padding === 0 ? "header" : "padding";
+        }
+      }
+      if (done) break;
+    }
+    if (!done) throw new Error("Invalid research package tar archive");
+    if (!hashes.has("manifest.json") || !hashes.has("records.json") || !hashes.has("README.md")) throw new Error("Research package is missing its manifest or records");
+    const manifest = parseManifest(new Uint8Array(await readFile(join(directory, "manifest.json"))));
+    const inventory = new Map(manifest.inventory.map((entry) => [entry.path, entry]));
+    for (const [entryPath, checksum] of hashes) {
+      if (entryPath === "manifest.json") continue;
+      const entry = inventory.get(entryPath);
+      if (!entry) throw new Error(`File is not listed in the package inventory: ${entryPath}`);
+      if (checksum !== entry.checksum) throw new Error(`Package checksum mismatch: ${entryPath}`);
+      if (sizes.get(entryPath) !== entry.sizeBytes) throw new Error(`Invalid research package entry size: ${entryPath}`);
+    }
+    for (const entry of manifest.inventory) if (!hashes.has(entry.path)) throw new Error(`Package inventory entry is missing: ${entry.path}`);
+    const records = parseJsonBytes(new Uint8Array(await readFile(join(directory, "records.json"))));
+    const readme = new Uint8Array(await readFile(join(directory, "README.md")));
+    const objects = new Map<string, string>();
+    for (const entry of manifest.inventory) {
+      if (entry.kind === "object") objects.set(entry.path.slice("objects/".length), join(directory, ...entry.path.split("/")));
+    }
+    const digest = createHash("sha256");
+    for await (const part of createReadStream(archivePath)) digest.update(part as Buffer);
+    const packageChecksum = digest.digest("hex");
+    return { manifest, records, readme, objects, directory,
+      receipt: { packageChecksum, sourcePackageChecksum: packageChecksum, importedObjectCount: objects.size,
+        importedRecordBytes: manifest.inventory.find((entry) => entry.path === "records.json")!.sizeBytes,
+        omissions: [...manifest.omissions], createdAt: new Date().toISOString(),
+        ...(manifest.exportProfile ? { exportProfile: manifest.exportProfile } : {}) } };
+  } catch (error) {
+    await closeSink().catch(() => undefined);
+    await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+    if ((error as { code?: string }).code === RESEARCH_PACKAGE_TOO_LARGE_CODE) throw researchPackageTooLargeError();
+    if ((error as NodeJS.ErrnoException).code === "ERR_BUFFER_TOO_LARGE") throw researchPackageTooLargeError();
+    throw error;
+  }
 }
 
 export function createResearchPackageProvider(): ResearchPackageProvider {
