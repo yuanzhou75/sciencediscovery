@@ -13,14 +13,18 @@ const options: ResearchPackageExportOptions = {
   includeFullMemoryGraph: true, revision: "r1",
 };
 
+/** The streaming writer ends the destination the task opened. */
+const writeAll = (destination: import("node:stream").Writable, bytes: Uint8Array) =>
+  new Promise<void>((resolve, reject) => destination.end(Buffer.from(bytes), (error?: Error | null) => error ? reject(error) : resolve()));
+
 test("background exports serialize creation, persist downloads across restart and enforce project scope", async () => {
   const root = await mkdtemp(join(tmpdir(), "research-exports-"));
   let active = 0, peak = 0, calls = 0;
-  const create = async (input: ResearchPackageExportOptions) => {
+  const create = async (input: ResearchPackageExportOptions, destination: import("node:stream").Writable) => {
     assert.deepEqual(input, options);
     active++; peak = Math.max(peak, active); calls++;
     await new Promise<void>((resolve) => setImmediate(resolve)); active--;
-    return new Uint8Array([1, 2, 3]);
+    await writeAll(destination, new Uint8Array([1, 2, 3]));
   };
   const exports = new ResearchPackageExports(root, async () => "r1", create);
   try {
@@ -44,7 +48,8 @@ test("background exports serialize creation, persist downloads across restart an
 test("prunes expired tasks and rejects expired downloads while the process stays running", async () => {
   const root = await mkdtemp(join(tmpdir(), "research-exports-"));
   let now = Date.now();
-  const exports = new ResearchPackageExports(root, async () => "r1", async () => new Uint8Array([1]), () => now);
+  const exports = new ResearchPackageExports(root, async () => "r1",
+    async (_options, destination) => writeAll(destination, new Uint8Array([1])), () => now);
   try {
     const first = await exports.start(options, "first.sdresearch");
     const second = await exports.start(options, "second.sdresearch");
@@ -67,8 +72,8 @@ test("prunes expired tasks and rejects expired downloads while the process stays
 test("revision changes fail the affected export without publishing a stale download or blocking later tasks", async () => {
   const root = await mkdtemp(join(tmpdir(), "research-exports-"));
   let revision = "r2", creates = 0;
-  const exports = new ResearchPackageExports(root, async () => revision, async () => {
-    creates++; revision = "r3"; return new Uint8Array([1]);
+  const exports = new ResearchPackageExports(root, async () => revision, async (_options, destination) => {
+    creates++; revision = "r3"; await writeAll(destination, new Uint8Array([1]));
   });
   try {
     const stale = await exports.start(options, "stale.sdresearch");
@@ -102,7 +107,9 @@ test("restart reports interrupted exports as failed rather than leaving them per
 test("cancel removes a queued export without packaging and leaves completed exports untouched", async () => {
   const root = await mkdtemp(join(tmpdir(), "research-exports-"));
   let creates = 0;
-  const create = async () => { creates++; return new Uint8Array([1]); };
+  const create = async (_options: ResearchPackageExportOptions, destination: import("node:stream").Writable) => {
+    creates++; await writeAll(destination, new Uint8Array([1]));
+  };
   const exports = new ResearchPackageExports(root, async () => "r1", create);
   try {
     const first = await exports.start(options, "first.sdresearch");
@@ -120,7 +127,9 @@ test("cancel during packaging drops the produced archive", async () => {
   const root = await mkdtemp(join(tmpdir(), "research-exports-"));
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
-  const create = async () => { await gate; return new Uint8Array([1]); };
+  const create = async (_options: ResearchPackageExportOptions, destination: import("node:stream").Writable) => {
+    await gate; await writeAll(destination, new Uint8Array([1]));
+  };
   const exports = new ResearchPackageExports(root, async () => "r1", create);
   try {
     const task = await exports.start(options, "task.sdresearch");
@@ -135,7 +144,8 @@ test("cancel during packaging drops the produced archive", async () => {
 
 test("cancel returns a finished task unchanged so a late cancel cannot undo a package", async () => {
   const root = await mkdtemp(join(tmpdir(), "research-exports-"));
-  const exports = new ResearchPackageExports(root, async () => "r1", async () => new Uint8Array([7]));
+  const exports = new ResearchPackageExports(root, async () => "r1",
+    async (_options, destination) => writeAll(destination, new Uint8Array([7])));
   try {
     const task = await exports.start(options, "done.sdresearch");
     await exports.close();
@@ -151,8 +161,27 @@ test("cancel returns a finished task unchanged so a late cancel cannot undo a pa
 
 test("cancel of an unknown task is not found", async () => {
   const root = await mkdtemp(join(tmpdir(), "research-exports-"));
-  const exports = new ResearchPackageExports(root, async () => "r1", async () => new Uint8Array([1]));
+  const exports = new ResearchPackageExports(root, async () => "r1",
+    async (_options, destination) => writeAll(destination, new Uint8Array([1])));
   try {
     assert.equal(await exports.cancel("12345678-1234-1234-1234-123456789abc", "project"), undefined);
+  } finally { await exports.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a writer that fails mid-stream leaves no partial archive to serve", async () => {
+  const root = await mkdtemp(join(tmpdir(), "research-exports-"));
+  const exports = new ResearchPackageExports(root, async () => "r1",
+    async (_options, destination) => {
+      destination.write(Buffer.from([1, 2, 3]));
+      await new Promise<void>((resolve) => destination.end(() => resolve()));
+      throw new Error("stream failed after the first bytes");
+    });
+  try {
+    const task = await exports.start(options, "partial.sdresearch");
+    await exports.close();
+    assert.equal((await exports.get(task.id, "project"))?.status, "failed");
+    assert.equal(await exports.download(task.id, "project"), undefined);
+    await assert.rejects(() => readFile(join(root, `${task.id}.sdresearch`)), { code: "ENOENT" },
+      "a failed stream must not leave a partial file behind");
   } finally { await exports.close(); await rm(root, { recursive: true, force: true }); }
 });

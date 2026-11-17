@@ -13,14 +13,15 @@
 // limitations under the License.
 
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { mkdir, readFile, writeFile, stat, lstat, readdir, utimes } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { RefStore, VersionStore, withWorkspaceMutation, type ObjectRef } from "@sciencediscovery/cas";
 import { researchPackagePlugin } from "@sciencediscovery/research-package/plugin";
 import { exportEvolveRuns, restoreEvolveRuns, MAX_RUNS } from "./evolution/package.js";
-import { RESEARCH_PACKAGE_MAX_BYTES, RESEARCH_PACKAGE_MAX_MAX_BYTES, createResearchPackageAsync, estimateResearchPackageBytes, jsonBytes, jsonByteLength, jsonDigest, researchPackageArchiveBytes, sha256, type ExportInput, type ImportedResearchPackage, type ResearchPackageCounts, type ResearchPackageExportProfile } from "@sciencediscovery/research-package";
+import { RESEARCH_PACKAGE_MAX_BYTES, RESEARCH_PACKAGE_MAX_MAX_BYTES, createResearchPackageAsync, estimateResearchPackageBytes, jsonBytes, jsonByteLength, jsonDigest, researchPackageArchiveBytes, sha256, writeResearchPackage, type ExportInput, type ImportedResearchPackage, type PackageObject, type PackageObjectStream, type ResearchPackageCounts, type ResearchPackageExportProfile } from "@sciencediscovery/research-package";
 import { contextBlocks, type TrajectoryDetail, type TrajectoryEntry } from "@sciencediscovery/trajectory";
 import type { MemoryGraphSnapshot } from "@sciencediscovery/memory";
 import type { ArtifactAnnotation, ArtifactOriginMeta, ArtifactReviewRun, ChatMessage, EnvironmentRevision, ResearchSnapshot, ReviewRun, ReviewerAuditTask, ReviewFeedback, ScientificArtifact, ScientificArtifactVersion, ScientificMemorySummary, Session, SessionRun, SessionRunEvent, WorkspaceFileProvenance } from "@sciencediscovery/schema";
@@ -30,6 +31,9 @@ import { listWorkspaceFiles } from "./artifacts/index.js";
 
 /** What a complete workspace listing returns, derived rather than re-imported. */
 type WorkspaceListing = Awaited<ReturnType<typeof listWorkspaceFiles>>;
+
+/** An export input whose objects may be streamed from their source instead of resident. */
+type StreamingExportInput = Omit<ExportInput, "objects"> & { objects?: readonly (PackageObject | PackageObjectStream)[] };
 
 /** True for the per-session shell-execution ledger under `execution-runs/`.
  *  Its content still counts; only its mtime is excluded (see `inspect`). */
@@ -380,7 +384,7 @@ export function createResearchSnapshots({ store, evolutionStore, evolveCandidate
       shells: sessions.map((session) => store.shellExecutions.revisionSnapshot(session.id)), environments: store.listEnvironmentRevisions(),
       memory: [memoryGraphEnabled(), memoryGraphClient.snapshotRevision(sessions.map((session) => session.id))] });
   };
-  const buildResearchPackageInput = async (projectId: string, sessionId?: string, level: "necessary" | "complete" = "necessary", selectedFiles?: Set<string>, cohort?: Set<string>, preview?: PreviewSizing, includeFullTrajectory = true, includeFullMemoryGraph = true, signal: AbortSignal = new AbortController().signal): Promise<ExportInput> => {
+  const buildResearchPackageInput = async (projectId: string, sessionId?: string, level: "necessary" | "complete" = "necessary", selectedFiles?: Set<string>, cohort?: Set<string>, preview?: PreviewSizing, includeFullTrajectory = true, includeFullMemoryGraph = true, signal: AbortSignal = new AbortController().signal, streamObjects = false): Promise<StreamingExportInput> => {
     signal.throwIfAborted();
     const previewObjectSizes = preview?.objectSizes;
     const project = store.getProject(projectId);
@@ -388,12 +392,31 @@ export function createResearchSnapshots({ store, evolutionStore, evolveCandidate
     const availableSessions = store.researchSessions(projectId);
     const sessions = availableSessions.filter((item) => cohort ? cohort.has(item.id) : (!item.researchSnapshot || item.researchSnapshot.state === "ready") && (!sessionId || item.id === sessionId));
     if (sessionId && !sessions.length) throw new SessionStoreHttpError("Session not found", 404);
-    const objects = new Map<string, { path: string; bytes: Uint8Array; kind: "artifact" | "evidence" | "log" | "other" }>();
+    type PackageObjectSource = { path: string; kind: "artifact" | "evidence" | "log" | "other" }
+      & ({ bytes: Uint8Array } | { sizeBytes: number; open: () => AsyncIterable<Uint8Array> });
+    // Anything large is handed to the writer as a re-openable source: the archive
+    // hashes each object and then reads it again, so the payload itself never has to
+    // be resident. `bytes` stays for small in-memory producers and for previews,
+    // which size the package without writing one.
+    const objects = new Map<string, PackageObjectSource>();
     const omissions: string[] = [];
     const addObject = async (bytes: Uint8Array, kind: "artifact" | "evidence" | "log" | "other") => {
       const path = sha256(bytes);
       if (!objects.has(path)) objects.set(path, { path, bytes, kind });
       return path;
+    };
+    const addStreamObject = (path: string, sizeBytes: number, open: () => AsyncIterable<Uint8Array>,
+      kind: "artifact" | "evidence" | "log" | "other") => {
+      if (!objects.has(path)) objects.set(path, { path, sizeBytes, open, kind });
+      return path;
+    };
+    /** Hash and size a file without holding it, then give the writer a fresh stream. */
+    const addFileObject = async (filePath: string, kind: "artifact" | "evidence" | "log" | "other") => {
+      const hash = createHash("sha256");
+      for await (const chunk of createReadStream(filePath)) hash.update(chunk as Buffer);
+      const sizeBytes = (await stat(filePath)).size;
+      return addStreamObject(hash.digest("hex"), sizeBytes,
+        () => createReadStream(filePath) as unknown as AsyncIterable<Uint8Array>, kind);
     };
     const addPreviewObject = (path: string, size: number, kind: "artifact" | "evidence" | "log") => {
       previewObjectSizes!.set(path, size);
@@ -567,7 +590,10 @@ export function createResearchSnapshots({ store, evolutionStore, evolveCandidate
         try {
           artifactObjectPaths.set(version.id, previewObjectSizes
             ? addPreviewObject(version.content.hash, version.content.size, "artifact")
-            : await addObject(await provenanceRecorder.cas.read(version.content.hash), "artifact"));
+            : streamObjects
+              ? addStreamObject(version.content.hash, version.content.size,
+                () => provenanceRecorder.cas.stream(version.content.hash), "artifact")
+              : await addObject(await provenanceRecorder.cas.read(version.content.hash), "artifact"));
         } catch (error) {
           omissions.push(`artifact:${version.id}:${error instanceof Error ? error.message : "unreadable"}`);
         }
@@ -692,7 +718,9 @@ export function createResearchSnapshots({ store, evolutionStore, evolveCandidate
         const retained: typeof record.workspace = [];
         for (const file of record.workspace) {
           try {
-            file.objectPath = await addObject(await readFile(resolveWorkspaceFile(store.workspacePath(record.session.id), file.path)), "evidence");
+            file.objectPath = streamObjects
+              ? await addFileObject(resolveWorkspaceFile(store.workspacePath(record.session.id), file.path), "evidence")
+              : await addObject(await readFile(resolveWorkspaceFile(store.workspacePath(record.session.id), file.path)), "evidence");
             retained.push(file);
           } catch (error) {
             omissions.push(`workspace:${record.session.id}:${file.path}:${error instanceof Error ? error.message : "unreadable"}`);
@@ -732,6 +760,12 @@ export function createResearchSnapshots({ store, evolutionStore, evolveCandidate
           let size = 0;
           for await (const chunk of provenanceRecorder.cas.stream(hash)) { signal.throwIfAborted(); size += chunk.byteLength; }
           addPreviewObject(hash, size, "log");
+        } else if (streamObjects) {
+          // The records carry no size for this object, so count it once and let the
+          // writer stream it; the alternative is keeping it resident until the end.
+          let size = 0;
+          for await (const chunk of provenanceRecorder.cas.stream(hash)) { signal.throwIfAborted(); size += chunk.byteLength; }
+          addStreamObject(hash, size, () => provenanceRecorder.cas.stream(hash), "log");
         } else await addObject(await provenanceRecorder.cas.read(hash), "log");
       }
       catch { signal.throwIfAborted(); omissions.push(`cas:${hash}:unavailable source object`); }
@@ -816,13 +850,13 @@ export function createResearchSnapshots({ store, evolutionStore, evolveCandidate
       }
       const selectedPaths = new Set(records.sessions?.find((record) => record.session.id === sessionId)?.workspace?.map((file) => file.path));
       return {
-        revision, estimatedBytes: estimateResearchPackageBytes(input, preview.objectSizes, preview.additionalRecordBytes), estimateKind: "uncompressed" as const,
+        revision, estimatedBytes: estimateResearchPackageBytes(input as ExportInput, preview.objectSizes, preview.additionalRecordBytes), estimateKind: "uncompressed" as const,
         // The cap and the exact tar size the export would be refused on. Both are
         // additive: a client that ignores them keeps the old behaviour, and a client
         // that uses them gates on the quantity the exporter itself checks rather than
         // on the approximation above (they differ by a few percent either way).
         maxBytes: RESEARCH_PACKAGE_MAX_BYTES,
-        archiveBytes: researchPackageArchiveBytes(input, preview.objectSizes, preview.additionalRecordBytes),
+        archiveBytes: researchPackageArchiveBytes(input as ExportInput, preview.objectSizes, preview.additionalRecordBytes),
         files: sessionId ? (await (preview.workspaceListings
           ? previewWorkspaceListing(preview.workspaceListings, store, sessionId)
           : listWorkspaceFiles(store, sessionId, true))).map((file) => ({ ...file, selected: selectedPaths.has(file.path) })) : [],
@@ -832,13 +866,14 @@ export function createResearchSnapshots({ store, evolutionStore, evolveCandidate
     .some((run) => run.status === "queued" || run.status === "running" || run.status === "blocked"));
   const previewResearchPackage = (projectId: string, sessionId: string | undefined, level: "necessary" | "complete", selectedFiles?: Set<string>, includeFullTrajectory = true, includeFullMemoryGraph = true) =>
     exportPreviews.get({ projectId, sessionId, level, selectedFiles, includeFullTrajectory, includeFullMemoryGraph });
-  const packageExports = new ResearchPackageExports(resolve(store.dataDir, "research-package-exports"), previewRevision, async (options: ResearchPackageExportOptions) => {
+  const packageExports = new ResearchPackageExports(resolve(store.dataDir, "research-package-exports"), previewRevision, async (options: ResearchPackageExportOptions, destination) => {
     const input = await buildResearchPackageInput(options.projectId, options.sessionId, options.level,
       options.selectedFiles ? new Set(options.selectedFiles) : undefined, undefined, undefined,
-      options.includeFullTrajectory, options.includeFullMemoryGraph);
+      options.includeFullTrajectory, options.includeFullMemoryGraph, new AbortController().signal, true);
     // An acknowledged over-cap export may use the safe ceiling; nothing beyond it.
-    return (await createResearchPackageAsync(input,
-      options.allowOverCap ? RESEARCH_PACKAGE_MAX_MAX_BYTES : RESEARCH_PACKAGE_MAX_BYTES)).bytes;
+    // The archive is written straight into the task's file, from streamed sources.
+    await writeResearchPackage(input, destination,
+      options.allowOverCap ? RESEARCH_PACKAGE_MAX_MAX_BYTES : RESEARCH_PACKAGE_MAX_BYTES);
   });
 
   const restorePackage = async (projectId: string, sessionId: string | undefined, bytes: Buffer, options: { operationId: string; sourceSessionId?: string; sourceMessageId?: string; imported?: ImportedResearchPackage }) => {
@@ -1268,7 +1303,7 @@ export function createResearchSnapshots({ store, evolutionStore, evolveCandidate
           verifyResearchCopy(imported.records, captured.records, ids, targetBySource, projectId, evolveRunIdMap);
           // Internal capture preserves every restored record; it must not relabel a necessary package as complete.
           const sourceProfile = imported.manifest.exportProfile;
-          const frozen = researchPackageProvider.export({ ...captured, omissions, exportProfile: sourceProfile,
+          const frozen = researchPackageProvider.export({ ...(captured as ExportInput), omissions, exportProfile: sourceProfile,
             records: { ...captured.records as Record<string, unknown>, exportLevel: sourceProfile?.level, exportProfile: sourceProfile } });
           frozenBytes = frozen.bytes;
           frozenChecksum = frozen.receipt.packageChecksum;
@@ -1321,7 +1356,7 @@ export function createResearchSnapshots({ store, evolutionStore, evolveCandidate
       const source = store.getSession(sourceSessionId);
       if (!source) throw new SessionStoreHttpError("Session not found", 404);
       const input = await buildResearchPackageInput(source.projectId, sourceSessionId, "complete");
-      return researchPackageProvider.export(await buildConversationBranch(input, sourceSessionId, messageId,
+      return researchPackageProvider.export(await buildConversationBranch(input as ExportInput, sourceSessionId, messageId,
         (hash) => provenanceRecorder.cas.read(hash), countExport)).bytes;
     });
   return { buildResearchPackageInput, exportPreviews, packageExports, previewResearchPackage, persistImportedResearchPackage, ...continuations };

@@ -1,6 +1,7 @@
 // Copyright (C) 2026-2026 Huawei Technologies Co., Ltd
 // Licensed under the Apache License, Version 2.0 (the "License");
 import { randomUUID } from "node:crypto";
+import { createWriteStream } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -35,7 +36,7 @@ export class ResearchPackageExports {
   constructor(
     private readonly root: string,
     private readonly currentRevision: (projectId: string, sessionId?: string) => Promise<string>,
-    private readonly createPackage: (options: ResearchPackageExportOptions) => Promise<Uint8Array>,
+    private readonly createPackage: (options: ResearchPackageExportOptions, destination: import("node:stream").Writable) => Promise<void>,
     private readonly now: () => number = () => Date.now(),
   ) {}
 
@@ -126,15 +127,19 @@ export class ResearchPackageExports {
       const before = await this.currentRevision(options.projectId, options.sessionId);
       if (canceled()) { stopCanceled(); return; }
       if (before !== options.revision) throw new Error("会话内容已更新，请使用最新大小预览重新导出。");
-      const bytes = await this.createPackage(options);
+      // Stream straight into the task's file: the archive is never held in memory,
+      // and a failure mid-write leaves a partial file that is removed below.
+      const outputPath = resolve(this.root, `${task.id}.sdresearch`);
+      await this.createPackage(options, createWriteStream(outputPath, { flags: "wx" }));
       // Cancellation requested while createPackage was running: drop the
       // produced archive instead of persisting it.
-      if (canceled()) { stopCanceled(); return; }
+      if (canceled()) { await rm(outputPath, { force: true }); stopCanceled(); return; }
       const after = await this.currentRevision(options.projectId, options.sessionId);
-      if (canceled()) { stopCanceled(); return; }
-      if (after !== options.revision) throw new Error("导出期间会话内容发生变化，请基于最新内容重新导出。");
-      const outputPath = resolve(this.root, `${task.id}.sdresearch`);
-      await writeFile(outputPath, bytes, { flag: "wx" });
+      if (canceled()) { await rm(outputPath, { force: true }); stopCanceled(); return; }
+      if (after !== options.revision) {
+        await rm(outputPath, { force: true });
+        throw new Error("导出期间会话内容发生变化，请基于最新内容重新导出。");
+      }
       // A cancel can land while the final write is in flight; committing
       // "completed" unconditionally would keep and advertise an archive the
       // user cancelled, so drop it and stay cancelled.
@@ -145,6 +150,9 @@ export class ResearchPackageExports {
       // the direct result of tearing the work down).
       if (canceled()) { stopCanceled(); }
       else { task.status = "failed"; task.error = reason instanceof Error ? reason.message : "证据包导出失败，请重试。"; task.updatedAt = this.timestamp(); }
+      // The archive is written in place now, so a failure mid-stream leaves a file
+      // that must not be served by download() after a restart.
+      await rm(resolve(this.root, `${task.id}.sdresearch`), { force: true }).catch(() => {});
     }
     try { await this.persist(task); } catch { /* Task result remains available for this process. */ }
   }
