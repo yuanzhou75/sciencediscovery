@@ -1,0 +1,60 @@
+[
+  {
+    "lang": "zh-CN",
+    "case": "results",
+    "file": "/home/yuanz/w1515-shots-1515/web/after/results-zh-CN.png",
+    "bytes": 23765,
+    "input": "铁锰",
+    "items": [
+      {
+        "title": "低温 SCR 脱硝实验",
+        "detail": "催化材料",
+        "snippet": "第 3 轮：铁锰复合氧化物在 180 °C 下 NO 转化率达到 92%，N2 选择性 98%。"
+      },
+      {
+        "title": "铁锰催化剂筛选",
+        "detail": "催化材料",
+        "snippet": null
+      }
+    ],
+    "empty": null
+  },
+  {
+    "lang": "zh-CN",
+    "case": "empty",
+    "file": "/home/yuanz/w1515-shots-1515/web/after/empty-zh-CN.png",
+    "bytes": 8274,
+    "input": "铁锰",
+    "items": [],
+    "empty": "没有匹配的项目、会话或产物。"
+  },
+  {
+    "lang": "en",
+    "case": "results",
+    "file": "/home/yuanz/w1515-shots-1515/web/after/results-en.png",
+    "bytes": 23058,
+    "input": "Fe-Mn",
+    "items": [
+      {
+        "title": "Low-temperature SCR deNOx",
+        "detail": "Catalyst materials",
+        "snippet": "Round 3: the Fe-Mn mixed oxide reaches 92% NO conversion at 180 C with 98% N2 selectivity."
+      },
+      {
+        "title": "Fe-Mn catalyst screening",
+        "detail": "Catalyst materials",
+        "snippet": null
+      }
+    ],
+    "empty": null
+  },
+  {
+    "lang": "en",
+    "case": "empty",
+    "file": "/home/yuanz/w1515-shots-1515/web/after/empty-en.png",
+    "bytes": 8080,
+    "input": "Fe-Mn",
+    "items": [],
+    "empty": "No matching projects, sessions, or artifacts."
+  }
+]

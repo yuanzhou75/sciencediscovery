@@ -1,0 +1,60 @@
+[
+  {
+    "lang": "zh-CN",
+    "case": "results",
+    "file": "/home/yuanz/w1515-shots-1515/web/before/results-zh-CN.png",
+    "bytes": 15539,
+    "input": "铁锰",
+    "items": [
+      {
+        "title": "低温 SCR 脱硝实验",
+        "detail": "催化材料",
+        "snippet": null
+      },
+      {
+        "title": "铁锰催化剂筛选",
+        "detail": "催化材料",
+        "snippet": null
+      }
+    ],
+    "empty": null
+  },
+  {
+    "lang": "zh-CN",
+    "case": "empty",
+    "file": "/home/yuanz/w1515-shots-1515/web/before/empty-zh-CN.png",
+    "bytes": 8274,
+    "input": "铁锰",
+    "items": [],
+    "empty": "没有匹配的项目、会话或产物。"
+  },
+  {
+    "lang": "en",
+    "case": "results",
+    "file": "/home/yuanz/w1515-shots-1515/web/before/results-en.png",
+    "bytes": 16334,
+    "input": "Fe-Mn",
+    "items": [
+      {
+        "title": "Low-temperature SCR deNOx",
+        "detail": "Catalyst materials",
+        "snippet": null
+      },
+      {
+        "title": "Fe-Mn catalyst screening",
+        "detail": "Catalyst materials",
+        "snippet": null
+      }
+    ],
+    "empty": null
+  },
+  {
+    "lang": "en",
+    "case": "empty",
+    "file": "/home/yuanz/w1515-shots-1515/web/before/empty-en.png",
+    "bytes": 8080,
+    "input": "Fe-Mn",
+    "items": [],
+    "empty": "No matching projects, sessions, or artifacts."
+  }
+]
