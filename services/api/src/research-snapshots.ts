@@ -1519,9 +1519,7 @@ export function createResearchSnapshots({ store, evolutionStore, evolveCandidate
           missingImmutableEvidence: declaredImmutableMissing,
           sessionMapping: Object.fromEntries(targetBySource),
           importedSessionIds: restoredSessionIds,
-          // The receipt repeats what the package declared as well as what this import
-          // found, so a degraded copy cannot read as one with nothing to say (#1532).
-          omissions: [...new Set([...imported.receipt.omissions, ...omissions])],
+          omissions,
           projectId: project.id,
           ...(sessionId ? { sessionId } : {}),
           storagePath: receipt.storagePath,

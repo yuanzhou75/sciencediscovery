@@ -80,7 +80,7 @@ export interface ResearchSnapshot {
    *  present such a copy as complete. */
   continuationDowngraded?: boolean;
   /** The omissions that make the copy degraded, named one by one so a surface can
-   *  say what is missing instead of only how many. Absent on a whole copy. */
+   *  say what is missing instead of only how many. Empty on a whole copy. */
   missingImmutableEvidence?: string[];
   /** Original package scope; copying does not recover omitted history. */
   exportLevel?: "necessary" | "complete";

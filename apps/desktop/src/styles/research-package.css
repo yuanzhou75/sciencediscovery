@@ -202,7 +202,7 @@
 .research-package-resume > div { min-width: 0; }
 .research-package-resume > button { flex: 0 0 auto; }
 .research-package-degraded { margin-top: 8px; }
-.research-package-degraded ul { margin: 4px 0 0; padding-left: 18px; }
+.research-package-degraded ul { margin: 4px 0 0; padding-left: 18px; max-height: 40vh; overflow: auto; }
 .research-package-degraded li { overflow-wrap: anywhere; }
 .research-package-dialog.is-import { width: min(700px, calc(100vw - 32px)); }
 .research-package-dialog.is-import .modal-body { padding-bottom: 24px; }

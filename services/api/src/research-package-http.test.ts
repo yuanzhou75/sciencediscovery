@@ -1134,9 +1134,9 @@ test("a copy that declares lost immutable evidence is continuable but never comp
   await request(`/api/projects/${source.id}/research-package/import?sessionId=${source.firstSession.id}`, {
     method: "POST", body: Buffer.from(researchTrajectoryFixture().bytes),
   });
-  const diag = await (await request(`/api/projects/${source.id}/research-package/preview?sessionId=${source.firstSession.id}&level=complete`)).json() as { maxBytes?: number; archiveBytes?: number; estimatedBytes?: number; omissions?: string[] };
   const base = `/api/projects/${source.id}/research-package?sessionId=${source.firstSession.id}&level=complete`;
-  const baseline = importResearchPackage(new Uint8Array(await (await request(base)).arrayBuffer()));
+  const wholeBytes = new Uint8Array(await (await request(base)).arrayBuffer());
+  const baseline = importResearchPackage(wholeBytes);
   const records = baseline.records as { artifacts?: Array<{ versions?: Array<{ objectPath?: string }> }> };
   const candidates = (records.artifacts ?? []).flatMap((artifact) => (artifact.versions ?? [])
     .map((version) => version.objectPath)).filter((path): path is string => Boolean(path));
@@ -1176,22 +1176,21 @@ test("a copy that declares lost immutable evidence is continuable but never comp
   assert.equal(detail.researchSnapshot?.continuationDowngraded, true, "the Session carries the same degraded state the receipt does");
   assert.deepEqual(detail.researchSnapshot?.missingImmutableEvidence, declared);
 
-  // Round trip: the receipt names the loss, and the copy's own preview is the same
-  // builder the export uses. What the second pass must not do is let a declared loss
-  // fall silent again: every omission the first package declared is still visible,
-  // either in the receipt or in what the copy says it would export. (The copy itself
-  // no longer references the lost object, so the second pass is allowed to be smaller
-  // — the point is that nothing disappears unannounced.)
-  assert.deepEqual(receipt.missingImmutableEvidence, declared);
-  for (const item of lost.manifest.omissions) {
-    assert.ok(receipt.omissions.includes(item) || declared.includes(item),
-      `the receipt still carries ${item}: ${JSON.stringify(receipt.omissions)}`);
-  }
+  // The copy no longer references the object it lost, so its own preview must not
+  // claim a CAS loss: what it cannot carry was already named by the receipt.
   const again = await (await request(
     `/api/projects/${target.id}/research-package/preview?sessionId=${target.firstSession.id}&level=complete`)).json() as { omissions: string[] };
-  for (const item of again.omissions) {
-    assert.ok(!item.startsWith("cas:") || declared.length > 0, "a CAS loss in the copy is one the receipt already names");
-    assert.ok(receipt.omissions.includes(item) || declared.includes(item),
-      `the second pass may not report a loss the receipt hid: ${item}`);
-  }
+  assert.deepEqual(again.omissions.filter((item) => item.startsWith("cas:")), [],
+    `the copy no longer references ${JSON.stringify(declared)}, so its preview has no CAS loss: ${JSON.stringify(again.omissions)}`);
+
+  // A whole copy has to stay whole. Without this, widening `declaredImmutableMissing`
+  // to non-fatal package omissions would mark every import degraded and show the
+  // desktop alert, and nothing here would fail.
+  const whole = await project();
+  const wholeReceipt = await (await request(`/api/projects/${whole.id}/research-package/import?sessionId=${whole.firstSession.id}`, {
+    method: "POST", body: Buffer.from(wholeBytes),
+  })).json() as { continuationAvailable: boolean; continuationDowngraded?: boolean; missingImmutableEvidence?: string[] };
+  assert.equal(wholeReceipt.continuationAvailable, true, "a whole copy is continuable");
+  assert.equal(wholeReceipt.continuationDowngraded, false, "a copy whose package declared no loss is not degraded");
+  assert.deepEqual(wholeReceipt.missingImmutableEvidence, [], "and it names nothing as missing");
 });
